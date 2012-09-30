@@ -106,6 +106,22 @@ exports.Server = (function() {
         }
     }
 
+    var runRequest = function( fun, url, req, res ) {
+        res.writeHead( 200, {'Content-Type': 'text/html'} );
+
+        console.log( '' );
+        console.log( 'request ' + req.url );
+
+        fun(url, req, res);
+    }
+
+    var runNotFound = function( fun, url, req, res ) {
+        res.writeHead( 404, {'Content-Type': 'text/html'} );
+
+        console.log( 'unknown ' + req.url );
+        fun( url, req, res );
+    }
+
     rockwall.prototype = {
         mime: function( ext, mime ) {
             if ( arguments.length === 2 ) {
@@ -141,9 +157,11 @@ exports.Server = (function() {
                                     if ( err ) {
                                         self.handleRequest( url, req, res );
                                     } else {
-                                        var ext = parseExtension( url.fileUrl );
-
+                                        var ext  = parseExtension( url.fileUrl );
                                         var mime = self.fileMimeTypes[ ext ] || 'text/plain';
+
+                                        console.log( '   file ' + req.url );
+
                                         res.writeHead( 200, {'Content-Type': mime} );
                                         res.end( data );
                                     }
@@ -162,15 +180,21 @@ exports.Server = (function() {
         },
 
         handleRequest: function(url, req, res) {
-            res.writeHead( 200, {'Content-Type': 'text/html'} );
-
             if ( this.routing[url.fileUrl] !== undefined ) {
-                this.routing[url.fileUrl](url, req, res);
+                runRequest(
+                        this.routing[url.fileUrl],
+                        url,
+                        req,
+                        res
+                );
             } else {
                 var urlParts = url.parts;
 
                 if ( urlParts.length === 0 ) {
-                    this.notFoundFun( url, req, res );
+                    runNotFound(
+                            this.notFoundFun,
+                            url, req, res
+                    );
                 } else {
                     var i = 0,
                         str = urlParts[0];
@@ -178,14 +202,17 @@ exports.Server = (function() {
                     do {
                         var fun = this.routing[ str ];
                         if ( fun !== undefined ) {
-                            fun(url, req, res);
+                            runRequest( fun, url, req, res );
                             return;
                         }
 
                         str += '/' + url.parts[i++];
                     } while ( i < urlParts.length );
 
-                    this.notFoundFun( url, req, res );
+                    runNotFound(
+                            this.notFoundFun,
+                            url, req, res
+                    );
                 }
             }
         },
@@ -224,8 +251,6 @@ exports.Server = (function() {
 
             var self = this;
             http.createServer(function(req, res) {
-                console.log( 'request ' + req.url );
-
                 var url = parseUrl( req.url );
                 self.handleFileRequest(url, req, res);
             }).listen( port );
