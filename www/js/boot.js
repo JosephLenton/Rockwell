@@ -42,6 +42,6 @@
     };
 
     documentReady( function() {
-        quby.main.runScriptTags();
+        quby.main.runScriptTagsDisplay();
     } );
 })();
