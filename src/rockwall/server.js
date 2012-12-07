@@ -50,12 +50,14 @@ exports.Server = (function() {
              */
             if ( str.charAt(0) === '/' ) {
                 if ( str.charAt(str.length-1) === '/' ) {
-                    return str.substring( 1, str.length-1 );
+                    return str.substring( 1, str.length1 );
                 } else {
-                    return str.substring( 1, str.length-1 );
+                    return str.substring( 1, str.length );
                 }
             } else if ( str.charAt(str.length-1) === '/' ) {
                 return str.substring( 0, str.length-1 );
+            } else {
+                return str;
             }
         }
     }
@@ -99,30 +101,181 @@ exports.Server = (function() {
         }
 
         return {
-                fileUrl: partsStr,
-                url  : str,
-                parts: parts,
-                query: query
+                fileUrl : partsStr,
+                url     : str,
+                parts   : parts,
+                query   : query
         }
     }
 
-    var runRequest = function( fun, url, req, res ) {
+    var runRequest = function( url, req, res, fun ) {
         res.writeHead( 200, {'Content-Type': 'text/html'} );
 
-        console.log( '' );
         console.log( 'request ' + req.url );
 
-        fun(url, req, res);
+        if ( fun ) {
+            fun(url, req, res);
+        }
+
+        res.end();
     }
 
-    var runNotFound = function( fun, url, req, res ) {
+    var runNotFound = function( url, req, res, fun ) {
         res.writeHead( 404, {'Content-Type': 'text/html'} );
 
         console.log( 'unknown ' + req.url );
-        fun( url, req, res );
+
+        if ( fun ) {
+            fun( url, req, res );
+        }
+
+        res.end();
+    }
+
+    var getRoute = function( routes, parts ) {
+        if ( parts.length === 0 ) {
+            return routes[''];
+        } else {
+            for ( var i = 0; i < parts.length; i++ ) {
+                var next = parts[i];
+
+                if ( routes.hasOwnProperty(next) ) {
+                    var routes = routes[ next ];
+
+                    if ( typeof routes === 'function' ) {
+                        return routes;
+                    } else if ( routes === undefined ) {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            return undefined;
+        }
+    }
+
+    var setRoute = function( routes, url, action ) {
+        var parts = trimSlashes(url).split( '/' );
+
+        for ( var i = 0; i < parts.length-1; i++ ) {
+            var part = parts[i];
+            var nextRoute = routes[part];
+
+            if ( nextRoute === undefined ) {
+                routes[part] = nextRoute = {};
+            } else if ( typeof nextRoute !== 'object' ) {
+                throw new Error("route already exists for " + url);
+            }
+
+            routes = nextRoute;
+        }
+
+        var last = parts[parts.length-1];
+
+        if ( routes[last] !== undefined ) {
+            throw new Error("route already exists for " + url);
+        }
+
+        routes[ last ] = action;
+    }
+
+    var Result = function( res ) {
+        this.res = res;
+        this.endCount = 0;
+
+        this.__defineSetter__( 'statusCode', function( code ) {
+            res.statusCode = code;
+            return code;
+        })
+
+        this.__defineGetter__( 'statusCode', function( code ) {
+            return res.statusCode;
+        })
+    }
+
+    Result.prototype = {
+            wait: function( f ) {
+                this.endCount++;
+            },
+
+            writeHead: function( code, reason, headers ) {
+                this.res.writeHead( code, reason, headers );
+            },
+
+            write: function( chunk, encoding ) {
+                this.res.write( chunk, encoding );
+            },
+
+            setHeader: function( head, value ) {
+                this.res.setHeader( head, value );
+            },
+
+            endWait: function( data, encoding ) {
+                this.endCount--;
+
+                if ( this.endCount < 0 ) {
+                    this.endCount = 0;
+                }
+
+                this.end( data, encoding );
+            },
+
+            end: function( data, encoding ) {
+                if ( this.endCount === 0 ) {
+                    this.res.end( data, encoding );
+                }
+            }
     }
 
     rockwall.prototype = {
+        serveFile: function( fileUrl, req, res, ifNotFound ) {
+            try {
+                var path = fs.realpathSync( this.realPublicFolder + fileUrl ).replace( /\\/g, "/" );
+
+                if ( path.indexOf(this.realPublicFolder) === 0 ) {
+                    var self = this;
+
+                    res.wait();
+                    fs.exists( path, function(exists) {
+                        if ( ! ifNotFound ) {
+                            ifNotFound = function() {
+                                runNotFound( fileUrl, req, res );
+                            }
+                        }
+
+                        if ( exists ) {
+                            fs.readFile( path, function( err, data ) {
+                                if ( err ) {
+                                    ifNotFound.call( self );
+
+                                    res.endWait();
+                                } else {
+                                    var ext  = parseExtension( fileUrl );
+                                    var mime = self.fileMimeTypes[ ext ] || 'text/plain';
+
+                                    console.log( '   file ' + req.url );
+
+                                    res.writeHead( 200, {'Content-Type': mime} );
+
+                                    res.endWait( data );
+                                }
+                            } );
+                        } else {
+                            ifNotFound.call( self );
+
+                            res.endWait();
+                        }
+                    } );
+
+                    return true;
+                }
+            } catch ( err ) { }
+
+            return false;
+        },
+
         mime: function( ext, mime ) {
             if ( arguments.length === 2 ) {
                 if ( ext.charAt(0) === '.' ) {
@@ -145,75 +298,31 @@ exports.Server = (function() {
 
         handleFileRequest: function(url, req, res) {
             if ( url.fileUrl !== '' ) {
-                try {
-                    var path = fs.realpathSync( this.realPublicFolder + url.fileUrl ).replace( /\\/g, "/" );
+                var ifNotFound = function() {
+                    this.handleRequest( url, req, res );
+                }
 
-                    if ( path.indexOf(this.realPublicFolder) === 0 ) {
-                        var self = this;
-
-                        fs.exists( path, function(exists) {
-                            if ( exists ) {
-                                fs.readFile( path, function( err, data ) {
-                                    if ( err ) {
-                                        self.handleRequest( url, req, res );
-                                    } else {
-                                        var ext  = parseExtension( url.fileUrl );
-                                        var mime = self.fileMimeTypes[ ext ] || 'text/plain';
-
-                                        console.log( '   file ' + req.url );
-
-                                        res.writeHead( 200, {'Content-Type': mime} );
-                                        res.end( data );
-                                    }
-                                } );
-                            } else {
-                                self.handleRequest( url, req, res );
-                            }
-                        } );
-
-                        return;
-                    }
-                } catch ( err ) { }
+                if ( this.serveFile(url.fileUrl, req, res, ifNotFound) ) {
+                    return;
+                }
             }
 
             this.handleRequest( url, req, res );
         },
 
         handleRequest: function(url, req, res) {
-            if ( this.routing[url.fileUrl] !== undefined ) {
+            var action = getRoute( this.routing, url.parts );
+
+            if ( action !== undefined ) {
                 runRequest(
-                        this.routing[url.fileUrl],
-                        url,
-                        req,
-                        res
+                        url, req, res,
+                        action
                 );
             } else {
-                var urlParts = url.parts;
-
-                if ( urlParts.length === 0 ) {
-                    runNotFound(
-                            this.notFoundFun,
-                            url, req, res
-                    );
-                } else {
-                    var i = 0,
-                        str = urlParts[0];
-                        
-                    do {
-                        var fun = this.routing[ str ];
-                        if ( fun !== undefined ) {
-                            runRequest( fun, url, req, res );
-                            return;
-                        }
-
-                        str += '/' + url.parts[i++];
-                    } while ( i < urlParts.length );
-
-                    runNotFound(
-                            this.notFoundFun,
-                            url, req, res
-                    );
-                }
+                runNotFound(
+                        url, req, res,
+                        this.notFoundFun
+                );
             }
         },
 
@@ -226,14 +335,14 @@ exports.Server = (function() {
                 if ( typeof url === 'object' ) {
                     for ( var k in url ) {
                         if ( url.hasOwnProperty(k) ) {
-                            this.route( k, url[k] );
+                            setRoute( this.routing, k, url[k] );
                         }
                     }
                 } else {
                     throw new Error( 'Invalid argument given' );
                 }
             } else {
-                this.routing[ trimSlashes(url) ] = action;
+                setRoute( this.routing, url, action );
             }
         },
 
@@ -252,7 +361,8 @@ exports.Server = (function() {
             var self = this;
             http.createServer(function(req, res) {
                 var url = parseUrl( req.url );
-                self.handleFileRequest(url, req, res);
+
+                self.handleFileRequest( url, req, new Result(res) );
             }).listen( port );
 
             console.log( 'server listening on port ' + port );
