@@ -1,1 +1,2 @@
-ruby %~dp0\start-server.rb
+ruby %~dp0\app.rb node.exe %~dp0\src\main.js
+
