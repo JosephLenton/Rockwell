@@ -216,7 +216,53 @@ exports.Server = (function() {
         }
     }
 
+    var serveFileInner = function( self, fileUrl, path, req, res, success, ifNotFound ) {
+        fs.readFile( path, function( err, data ) {
+            if ( err ) {
+                ifNotFound.call( self );
+            } else {
+                var ext  = parseExtension( fileUrl );
+                var mime = self.fileMimeTypes[ ext ] || 'text/plain';
+
+                console.log( '   file ' + req.url );
+
+                res.
+                        status( 200, mime ).
+                        write( data );
+
+                if ( success ) {
+                    success( req, res );
+                }
+
+                res.end();
+            }
+        } );
+    };
+
     rockwall.prototype = {
+        servePublicFile: function( fileUrl, req, res, success, ifNotFound ) {
+            if ( ! ifNotFound ) {
+                ifNotFound = function() {
+                    runNotFound( fileUrl, req, res );
+                }
+            }
+
+            var self = this;
+            fs.realpath( this.realPublicFolder + fileUrl, function(err, path) {
+                if ( err ) {
+                    ifNotFound.call( self, err );
+                } else {
+                    path = path.replace( /\\/g, "/" );
+
+                    if ( path.indexOf(self.realPublicFolder) !== 0 ) {
+                        ifNotFound.call( self, new Error("File is outside public folder") );
+                    } else {
+                        serveFileInner( self, fileUrl, path, req, res, success, ifNotFound );
+                    }
+                }
+            })
+        },
+
         serveFile: function( fileUrl, req, res, success, ifNotFound ) {
             var self = this;
 
@@ -226,46 +272,15 @@ exports.Server = (function() {
                 }
             }
 
-            try {
-                var path = fs.realpathSync( this.realPublicFolder + fileUrl ).replace( /\\/g, "/" );
+            fs.realpath( this.realPublicFolder + fileUrl, function(err, path) {
+                path = path.replace( /\\/g, "/" );
 
-                if ( path.indexOf(this.realPublicFolder) === 0 ) {
-                    fs.exists( path, function(exists) {
-                        if ( exists ) {
-                            fs.readFile( path, function( err, data ) {
-                                if ( err ) {
-                                    ifNotFound.call( self );
-                                } else {
-                                    var ext  = parseExtension( fileUrl );
-                                    var mime = self.fileMimeTypes[ ext ] || 'text/plain';
-
-                                    console.log( '   file ' + req.url );
-
-                                    res.
-                                            status( 200, mime ).
-                                            write( data );
-
-                                    if ( success ) {
-                                        success( req, res );
-                                    }
-
-                                    res.end();
-                                }
-                            } );
-                        } else {
-                            ifNotFound.call( self );
-                        }
-                    } );
-
-                    return true;
+                if ( err ) {
+                    ifNotFound.call( self, err );
+                } else {
+                   serveFileInner( self, fileUrl, path, req, res, success, ifNotFound );
                 }
-            } catch ( err ) {
-                ifNotFound.call( self );
-
-                return true;
-            }
-
-            return false;
+            } )
         },
 
         mime: function( ext, mime ) {
@@ -304,9 +319,7 @@ exports.Server = (function() {
                     this.handleRequest( url, req, res );
                 }
 
-                if ( this.serveFile(url.fileUrl, req, res, null, ifNotFound) ) {
-                    return;
-                }
+                this.servePublicFile( url.fileUrl, req, res, null, ifNotFound )
             } else {
                 this.handleRequest( url, req, res );
             }
