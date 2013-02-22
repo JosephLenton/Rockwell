@@ -7,6 +7,9 @@
  */
 
 exports.Server = (function() {
+    var RockwallRequest  = require( './rockwall-request.js'  ).RockwallRequest,
+        RockwallResponse = require( './rockwall-response.js' ).RockwallResponse;
+
     var http = require('http'),
         fs   = require('fs');
 
@@ -19,6 +22,7 @@ exports.Server = (function() {
         this.realPublicFolder = '';
 
         this.routing = {};
+        this.preRouting = {};
     };
 
     var ensureSlash = function( str ) {
@@ -109,19 +113,15 @@ exports.Server = (function() {
     }
 
     var runRequest = function( url, req, res, fun ) {
-        res.writeHead( 200, {'Content-Type': 'text/html'} );
-
         console.log( 'request ' + req.url );
 
         if ( fun ) {
             fun(url, req, res);
         }
-
-        res.end();
     }
 
     var runNotFound = function( url, req, res, fun ) {
-        res.writeHead( 404, {'Content-Type': 'text/html'} );
+        res.status( 404, 'text/html' );
 
         console.log( 'unknown ' + req.url );
 
@@ -181,97 +181,89 @@ exports.Server = (function() {
         routes[ last ] = action;
     }
 
-    var Result = function( res ) {
-        this.res = res;
-        this.endCount = 0;
+    var iterateArgs = function( obj, args, f ) {
+        if ( arguments.length === 2 ) {
+            f = args;
+            args = obj;
+            obj = null;
+        }
 
-        this.__defineSetter__( 'statusCode', function( code ) {
-            res.statusCode = code;
-            return code;
-        })
+        if ( args.length === 0 ) {
+            throw new Error( "no arguments given" );
+        } else if ( args.length === 1 ) {
+            var arg = args[0];
 
-        this.__defineGetter__( 'statusCode', function( code ) {
-            return res.statusCode;
-        })
-    }
-
-    Result.prototype = {
-            wait: function( f ) {
-                this.endCount++;
-            },
-
-            writeHead: function( code, reason, headers ) {
-                this.res.writeHead( code, reason, headers );
-            },
-
-            write: function( chunk, encoding ) {
-                this.res.write( chunk, encoding );
-            },
-
-            setHeader: function( head, value ) {
-                this.res.setHeader( head, value );
-            },
-
-            endWait: function( data, encoding ) {
-                this.endCount--;
-
-                if ( this.endCount < 0 ) {
-                    this.endCount = 0;
+            if ( typeof arg === 'object' ) {
+                for ( var k in arg ) {
+                    if ( arg.hasOwnProperty(k) ) {
+                        f.call( obj, k, arg[k] );
+                    }
                 }
-
-                this.end( data, encoding );
-            },
-
-            end: function( data, encoding ) {
-                if ( this.endCount === 0 ) {
-                    this.res.end( data, encoding );
-                }
+            } else {
+                throw new Error( 'Invalid argument given' );
             }
+        } else {
+            var first  = args[0],
+                second = args[1];
+
+            if ( first instanceof Array ) {
+                for ( var i = 0; i < first.length; i++ ) {
+                    f.call( obj, first[i], second );
+                }
+            } else {
+                f.call( obj, first, second );
+            }
+        }
     }
 
     rockwall.prototype = {
-        serveFile: function( fileUrl, req, res, ifNotFound ) {
+        serveFile: function( fileUrl, req, res, success, ifNotFound ) {
+            var self = this;
+
+            if ( ! ifNotFound ) {
+                ifNotFound = function() {
+                    runNotFound( fileUrl, req, res );
+                }
+            }
+
             try {
                 var path = fs.realpathSync( this.realPublicFolder + fileUrl ).replace( /\\/g, "/" );
 
                 if ( path.indexOf(this.realPublicFolder) === 0 ) {
-                    var self = this;
-
-                    res.wait();
                     fs.exists( path, function(exists) {
-                        if ( ! ifNotFound ) {
-                            ifNotFound = function() {
-                                runNotFound( fileUrl, req, res );
-                            }
-                        }
-
                         if ( exists ) {
                             fs.readFile( path, function( err, data ) {
                                 if ( err ) {
                                     ifNotFound.call( self );
-
-                                    res.endWait();
                                 } else {
                                     var ext  = parseExtension( fileUrl );
                                     var mime = self.fileMimeTypes[ ext ] || 'text/plain';
 
                                     console.log( '   file ' + req.url );
 
-                                    res.writeHead( 200, {'Content-Type': mime} );
+                                    res.
+                                            status( 200, mime ).
+                                            write( data );
 
-                                    res.endWait( data );
+                                    if ( success ) {
+                                        success( req, res );
+                                    }
+
+                                    res.end();
                                 }
                             } );
                         } else {
                             ifNotFound.call( self );
-
-                            res.endWait();
                         }
                     } );
 
                     return true;
                 }
-            } catch ( err ) { }
+            } catch ( err ) {
+                ifNotFound.call( self );
+
+                return true;
+            }
 
             return false;
         },
@@ -296,18 +288,28 @@ exports.Server = (function() {
             return this;
         },
 
+        /*
+         * If there is an url with content,
+         * i.e. it's not a blank string (like ""),
+         * then we presume it's a file.
+         *
+         * If that fails, we handle it as a request.
+         *
+         * Empty strings, such as '', the root url,
+         * are always treated as a route.
+         */
         handleFileRequest: function(url, req, res) {
             if ( url.fileUrl !== '' ) {
                 var ifNotFound = function() {
                     this.handleRequest( url, req, res );
                 }
 
-                if ( this.serveFile(url.fileUrl, req, res, ifNotFound) ) {
+                if ( this.serveFile(url.fileUrl, req, res, null, ifNotFound) ) {
                     return;
                 }
+            } else {
+                this.handleRequest( url, req, res );
             }
-
-            this.handleRequest( url, req, res );
         },
 
         handleRequest: function(url, req, res) {
@@ -330,20 +332,30 @@ exports.Server = (function() {
             this.notFoundFun = notFoundFun;
         },
 
+        /**
+         * Allows you to set an action to perform
+         * before a standard route.
+         */
+        preRoute: function( url, action ) {
+            iterateArgs(
+                    arguments,
+                    (function( url, action ) {
+                            setRoute( this.preRouting, url, action );
+                    }).bind(this)
+            );
+
+            return this;
+        },
+
         route: function( url, action ) {
-            if ( arguments.length === 1 ) {
-                if ( typeof url === 'object' ) {
-                    for ( var k in url ) {
-                        if ( url.hasOwnProperty(k) ) {
-                            setRoute( this.routing, k, url[k] );
-                        }
-                    }
-                } else {
-                    throw new Error( 'Invalid argument given' );
-                }
-            } else {
-                setRoute( this.routing, url, action );
-            }
+            iterateArgs(
+                    arguments,
+                    (function( url, action ) {
+                            setRoute( this.routing, url, action );
+                    }).bind(this)
+            );
+
+            return this;
         },
 
         start: function( publicFolder, port ) {
@@ -360,9 +372,19 @@ exports.Server = (function() {
 
             var self = this;
             http.createServer(function(req, res) {
-                var url = parseUrl( req.url );
+                req = new RockwallRequest(req);
+                res = new RockwallResponse(res);
 
-                self.handleFileRequest( url, req, new Result(res) );
+                var url = parseUrl( req.url );
+                var action = getRoute( self.preRouting, url.parts );
+
+                if ( action !== undefined ) {
+                    if ( action.call(this, url, req, res) !== false ) {
+                        self.handleFileRequest( url, req, res );
+                    }
+                } else {
+                    self.handleFileRequest( url, req, res );
+                }
             }).listen( port );
 
             console.log( 'server listening on port ' + port );
